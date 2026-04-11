@@ -19,8 +19,6 @@ const MODEL_DRAFT_VERSIONS: { [key: string]: string } = {
   "jimeng-video-3.5-pro": "3.3.4",
   "jimeng-video-3.0-pro": "3.2.8",
   "jimeng-video-3.0": "3.2.8",
-  "jimeng-video-2.0": "3.2.8",
-  "jimeng-video-2.0-pro": "3.2.8",
   // Seedance 模型（与上游 iptag/jimeng-api 保持一致）
   "jimeng-video-seedance-2.0": "3.3.9",
   "seedance-2.0": "3.3.9",
@@ -40,8 +38,6 @@ const MODEL_MAP = {
   "jimeng-video-3.5-pro": "dreamina_ic_generate_video_model_vgfm_3.5_pro",
   "jimeng-video-3.0-pro": "dreamina_ic_generate_video_model_vgfm_3.0_pro",
   "jimeng-video-3.0": "dreamina_ic_generate_video_model_vgfm_3.0",
-  "jimeng-video-2.0": "dreamina_ic_generate_video_model_vgfm_lite",
-  "jimeng-video-2.0-pro": "dreamina_ic_generate_video_model_vgfm1.0",
   // Seedance 多图智能视频生成模型（jimeng-video-seedance-2.0 为上游标准名称）
   "jimeng-video-seedance-2.0": "dreamina_seedance_40_pro",
   "seedance-2.0": "dreamina_seedance_40_pro",
@@ -73,6 +69,12 @@ const SEEDANCE_BENEFIT_TYPE_MAP: { [key: string]: string } = {
   "seedance-2.0-vip": "seedance_20_pro_720p_output",
 };
 
+const INTERNATIONAL_VIDEO_MODEL_MAP: Record<string, string> = {
+  "jimeng-video-3.5-pro": "dreamina_ic_generate_video_model_vgfm_3.5_pro",
+  "jimeng-video-3.0-pro": "dreamina_ic_generate_video_model_vgfm_3.0_pro",
+  "jimeng-video-3.0": "dreamina_ic_generate_video_model_vgfm_3.0",
+};
+
 const INTERNATIONAL_SEEDANCE_MODEL_MAP: Record<string, string> = {
   "jimeng-video-seedance-2.0": "dreamina_seedance_40_pro",
   "seedance-2.0-pro": "dreamina_seedance_40_pro",
@@ -95,9 +97,35 @@ const INTERNATIONAL_SEEDANCE_BENEFIT_TYPE_MAP: Record<string, string> = {
   "seedance-2.0-vip": "seedance_20_pro_720p_output",
 };
 
+function getVideoBenefitType(model: string): string {
+  if (model.includes("3.5_pro")) {
+    return "dreamina_video_seedance_15_pro";
+  }
+  if (model.includes("3.5")) {
+    return "dreamina_video_seedance_15";
+  }
+  return "basic_video_operation_vgfm_v_three";
+}
+
+function getInternationalVideoDraftVersion(_model: string): string {
+  if (Object.prototype.hasOwnProperty.call(INTERNATIONAL_VIDEO_MODEL_MAP, _model)) {
+    return "3.3.12";
+  }
+  return MODEL_DRAFT_VERSIONS[_model] || DEFAULT_DRAFT_VERSION;
+}
+
 // 判断是否为 Seedance 模型
 export function isSeedanceModel(model: string): boolean {
   return model.startsWith("seedance-") || model.startsWith("jimeng-video-seedance-");
+}
+
+export function isInternationalVideoModel(model: string): boolean {
+  return Object.prototype.hasOwnProperty.call(INTERNATIONAL_VIDEO_MODEL_MAP, model)
+    || Object.prototype.hasOwnProperty.call(INTERNATIONAL_SEEDANCE_MODEL_MAP, model);
+}
+
+function getInternationalVideoModel(model: string): string {
+  return INTERNATIONAL_VIDEO_MODEL_MAP[model] || INTERNATIONAL_SEEDANCE_MODEL_MAP[model];
 }
 
 export function isInternationalSeedanceModel(model: string): boolean {
@@ -653,7 +681,7 @@ async function uploadImageForVideo(imageUrl: string, refreshToken: string, regio
 }
 
 // 从Buffer上传视频图片
-async function uploadImageBufferForVideo(buffer: Buffer, refreshToken: string, regionInfo?: import("./core.ts").RegionInfo): Promise<string> {
+export async function uploadImageBufferForVideo(buffer: Buffer, refreshToken: string, regionInfo?: import("./core.ts").RegionInfo): Promise<string> {
   try {
     logger.info(`开始从Buffer上传视频图片，大小: ${buffer.length}字节`);
 
@@ -1091,6 +1119,9 @@ async function fetchHighQualityVideoUrl(itemId: string, refreshToken: string): P
   try {
     logger.info(`尝试获取高质量视频下载URL，item_id: ${itemId}`);
 
+    const regionInfo = parseRegionFromToken(refreshToken);
+    const isInternational = regionInfo.isInternational || regionInfo.isUS;
+
     const result = await request("post", "/mweb/v1/get_local_item_list", refreshToken, {
       data: {
         item_id_list: [itemId],
@@ -1105,53 +1136,108 @@ async function fetchHighQualityVideoUrl(itemId: string, refreshToken: string): P
     const responseStr = JSON.stringify(result);
     logger.info(`get_local_item_list 响应大小: ${responseStr.length} 字符`);
 
+    // 提取视频URL（按优先级尝试多种策略）
+    let videoUrl: string | null = null;
+
     // 策略1: 从结构化字段中提取视频URL
     const itemList = result.item_list || result.local_item_list || [];
     if (itemList.length > 0) {
       const item = itemList[0];
-      const videoUrl =
+      videoUrl =
+        item?.common_attr?.transcoded_video?.origin?.video_url ||
         item?.result_url ||
         item?.video?.transcoded_video?.origin?.video_url ||
         item?.video?.download_url ||
         item?.video?.play_url ||
         item?.video?.url;
-
       if (videoUrl) {
-        logger.info(`从get_local_item_list结构化字段获取到高清视频URL: ${videoUrl}`);
-        return videoUrl;
+        logger.info(`从get_local_item_list结构化字段获取到高清视频URL`);
       }
     }
 
     // 策略2: 正则匹配 dreamnia.jimeng.com 高质量URL
-    const hqUrlMatch = responseStr.match(/https:\/\/v[0-9]+-dreamnia\.jimeng\.com\/[^"\s\\]+/);
-    if (hqUrlMatch && hqUrlMatch[0]) {
-      logger.info(`正则提取到高质量视频URL (dreamnia): ${hqUrlMatch[0]}`);
-      return hqUrlMatch[0];
+    if (!videoUrl) {
+      const hqUrlMatch = responseStr.match(/https:\/\/v[0-9]+-dreamnia\.jimeng\.com\/[^"\s\\]+/);
+      if (hqUrlMatch && hqUrlMatch[0]) {
+        videoUrl = hqUrlMatch[0];
+        logger.info(`正则提取到高质量视频URL (dreamnia)`);
+      }
     }
 
     // 策略3: 匹配任何 jimeng.com 域名的视频URL
-    const jimengUrlMatch = responseStr.match(/https:\/\/v[0-9]+-[^"\\]*\.jimeng\.com\/[^"\s\\]+/);
-    if (jimengUrlMatch && jimengUrlMatch[0]) {
-      logger.info(`正则提取到jimeng视频URL: ${jimengUrlMatch[0]}`);
-      return jimengUrlMatch[0];
+    if (!videoUrl) {
+      const jimengUrlMatch = responseStr.match(/https:\/\/v[0-9]+-[^"\\]*\.jimeng\.com\/[^"\s\\]+/);
+      if (jimengUrlMatch && jimengUrlMatch[0]) {
+        videoUrl = jimengUrlMatch[0];
+        logger.info(`正则提取到jimeng视频URL`);
+      }
     }
 
     // 策略4: 匹配任何视频URL（兜底）
-    const anyVideoUrlMatch = responseStr.match(/https:\/\/[^"\s\\]+\.(?:vlabvod|jimeng|capcut)\.com\/[^"\s\\]+/);
-    if (anyVideoUrlMatch && anyVideoUrlMatch[0]) {
-      logger.info(`从get_local_item_list提取到视频URL: ${anyVideoUrlMatch[0]}`);
-      return anyVideoUrlMatch[0];
+    if (!videoUrl) {
+      const anyVideoUrlMatch = responseStr.match(/https:\/\/[^"\s\\]+\.(?:vlabvod|jimeng|capcut)\.com\/[^"\s\\]+/);
+      if (anyVideoUrlMatch && anyVideoUrlMatch[0]) {
+        videoUrl = anyVideoUrlMatch[0];
+        logger.info(`从get_local_item_list提取到视频URL`);
+      }
     }
 
     // 策略5: 匹配国际版 CapCut CDN
-    const capcutUrlMatch = responseStr.match(/https:\/\/[^"\s\\]*capcut\.com\/[^"\s\\]+/);
-    if (capcutUrlMatch && capcutUrlMatch[0]) {
-      logger.info(`正则提取到国际版 CapCut 视频URL: ${capcutUrlMatch[0]}`);
-      return capcutUrlMatch[0];
+    if (!videoUrl) {
+      const capcutUrlMatch = responseStr.match(/https:\/\/[^"\s\\]*capcut\.com\/[^"\s\\]+/);
+      if (capcutUrlMatch && capcutUrlMatch[0]) {
+        videoUrl = capcutUrlMatch[0];
+        logger.info(`正则提取到国际版 CapCut 视频URL`);
+      }
     }
 
-    logger.warn(`未能从get_local_item_list响应中提取到视频URL`);
-    return null;
+    if (!videoUrl) {
+      logger.warn(`未能从get_local_item_list响应中提取到视频URL`);
+      return null;
+    }
+
+    // 国际版用户：调用权益API处理VIP去水印权益
+    // 真实浏览器流程：get_local_item_list → benefit_metadata → batch_get_user_benefit → 下载
+    // VIP用户的视频URL由服务端根据session的VIP状态决定，lr=display_watermark_aigc 实际为无水印版本
+    if (isInternational) {
+      try {
+        await request("post", "/commerce/v3/resource/benefit_metadata", refreshToken, {
+          data: {
+            query_list: [
+              { resource_type: "aigc", resource_id: "get_all", benefit_type_list: [] },
+              { resource_type: "normal_func", resource_id: "get_all", benefit_type_list: [] },
+            ],
+          },
+        });
+        logger.info(`国际版权益API benefit_metadata 调用完成`);
+      } catch (e) {
+        logger.warn(`国际版权益API benefit_metadata 调用失败: ${e.message}`);
+      }
+
+      try {
+        await request("post", "/commerce/v3/benefits/batch_get_user_benefit", refreshToken, {
+          data: {
+            query_list: [
+              { resource_type: "aigc", resource_id: "get_all", benefit_type_list: [] },
+              { resource_type: "normal_func", resource_id: "get_all", benefit_type_list: [] },
+            ],
+          },
+        });
+        logger.info(`国际版权益API batch_get_user_benefit 调用完成`);
+      } catch (e) {
+        logger.warn(`国际版权益API batch_get_user_benefit 调用失败: ${e.message}`);
+      }
+    }
+
+    // 检测水印状态并记录日志
+    if (videoUrl.includes("display_watermark_busi_aigc")) {
+      logger.warn(`视频URL包含免费账号水印标识 (display_watermark_busi_aigc)，视频将带有水印`);
+    } else if (videoUrl.includes("display_watermark_aigc")) {
+      logger.info(`视频URL包含VIP账号标识 (display_watermark_aigc)，VIP用户此URL为无水印版本`);
+    }
+
+    logger.info(`获取到视频URL: ${videoUrl}`);
+    return videoUrl;
   } catch (error) {
     logger.warn(`获取高质量视频下载URL失败: ${error.message}`);
     return null;
@@ -2173,7 +2259,8 @@ async function pollHistoryForVideoUrl(historyId: string, refreshToken: string): 
     }
   }
 
-  const videoUrl = item_list?.[0]?.result_url
+  const videoUrl = item_list?.[0]?.common_attr?.transcoded_video?.origin?.video_url
+    || item_list?.[0]?.result_url
     || item_list?.[0]?.video?.transcoded_video?.origin?.video_url
     || item_list?.[0]?.video?.play_url
     || item_list?.[0]?.video?.download_url
@@ -2265,7 +2352,7 @@ function collectInternationalMaterialFields(filesMap: Record<string, any[]>, bod
   return { imageFields, videoFields };
 }
 
-async function uploadInternationalImageUrl(imageUrl: string, refreshToken: string, regionInfo: import("./core.ts").RegionInfo): Promise<string> {
+export async function uploadInternationalImageUrl(imageUrl: string, refreshToken: string, regionInfo: import("./core.ts").RegionInfo): Promise<string> {
   const response = await fetch(imageUrl);
   if (!response.ok) throw new Error(`下载图片失败: ${response.status}`);
   const buffer = Buffer.from(await response.arrayBuffer());
@@ -2279,6 +2366,238 @@ async function uploadInternationalVideoUrl(videoUrl: string, refreshToken: strin
   return uploadMediaForVideo(buffer, "video", refreshToken, undefined, regionInfo);
 }
 
+async function generateInternationalVideoCore(
+  _model: string,
+  prompt: string = "",
+  {
+    ratio = "1:1",
+    resolution = "720p",
+    duration = 5,
+    filePaths = [],
+    files = [],
+  }: {
+    ratio?: string;
+    resolution?: string;
+    duration?: number;
+    filePaths?: string[];
+    files?: any[];
+  },
+  refreshToken: string,
+  onHistoryId?: (historyId: string) => void
+): Promise<{ url: string; historyId: string }> {
+  if (!Object.prototype.hasOwnProperty.call(INTERNATIONAL_VIDEO_MODEL_MAP, _model)) {
+    throw new APIException(EX.API_REQUEST_PARAMS_INVALID, `国际接口暂不支持模型: ${_model}`);
+  }
+
+  const regionInfo = parseRegionFromToken(refreshToken);
+  if (regionInfo.isCN) {
+    throw new APIException(EX.API_REQUEST_FAILED, "国际视频接口仅接受国际 token（hk-/jp-/sg-/al-/az-/bh-/ca-/cl-/de-/gb-/gy-/il-/iq-/it-/jo-/kg-/om-/pk-/pt-/sa-/se-/tr-/tz-/uz-/ve-/xk-）");
+  }
+
+  const model = getInternationalVideoModel(_model);
+  const assistantId = getAssistantId(regionInfo);
+  const { width, height } = resolveVideoResolution(resolution, ratio);
+  const draftVersion = getInternationalVideoDraftVersion(_model);
+
+  logger.info(`国际普通视频生成: 模型=${_model} 映射=${model} ${width}x${height} (${ratio}@${resolution}) 时长=${duration}秒`);
+
+  const { totalCredit } = await getCredit(refreshToken);
+  if (totalCredit <= 0) await receiveCredit(refreshToken);
+
+  await request("post", "/mweb/v1/workspace/update", refreshToken, {
+    params: {
+      os: "windows",
+      web_version: "7.5.0",
+      da_version: draftVersion,
+      aigc_features: "app_lip_sync",
+    },
+    data: { workspace_id: 0 },
+    headers: { Referer: "https://dreamina.capcut.com/" },
+  });
+
+  let first_frame_image = undefined;
+  let end_frame_image = undefined;
+
+  if (files && files.length > 0) {
+    const uploadIDs: string[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (!file || !file.filepath) continue;
+      try {
+        const buffer = fs.readFileSync(file.filepath);
+        const imageUri = await uploadImageBufferForVideo(buffer, refreshToken, regionInfo);
+        if (imageUri) uploadIDs.push(imageUri);
+      } catch (error) {
+        if (i === 0) throw new APIException(EX.API_REQUEST_FAILED, `首帧文件上传失败: ${error.message}`);
+      }
+    }
+    if (uploadIDs.length === 0) throw new APIException(EX.API_REQUEST_FAILED, "所有文件上传失败");
+    if (uploadIDs[0]) {
+      first_frame_image = { format: "", height, id: util.uuid(), image_uri: uploadIDs[0], name: "", platform_type: 1, source_from: "upload", type: "image", uri: uploadIDs[0], width };
+    }
+    if (uploadIDs[1]) {
+      end_frame_image = { format: "", height, id: util.uuid(), image_uri: uploadIDs[1], name: "", platform_type: 1, source_from: "upload", type: "image", uri: uploadIDs[1], width };
+    }
+  } else if (filePaths && filePaths.length > 0) {
+    const uploadIDs: string[] = [];
+    for (let i = 0; i < filePaths.length; i++) {
+      if (!filePaths[i]) continue;
+      try {
+        const imageUri = await uploadImageForVideo(filePaths[i], refreshToken, regionInfo);
+        if (imageUri) uploadIDs.push(imageUri);
+      } catch (error) {
+        if (i === 0) throw new APIException(EX.API_REQUEST_FAILED, `首帧图片上传失败: ${error.message}`);
+      }
+    }
+    if (uploadIDs.length === 0) throw new APIException(EX.API_REQUEST_FAILED, "所有图片上传失败");
+    if (uploadIDs[0]) {
+      first_frame_image = { format: "", height, id: util.uuid(), image_uri: uploadIDs[0], name: "", platform_type: 1, source_from: "upload", type: "image", uri: uploadIDs[0], width };
+    }
+    if (uploadIDs[1]) {
+      end_frame_image = { format: "", height, id: util.uuid(), image_uri: uploadIDs[1], name: "", platform_type: 1, source_from: "upload", type: "image", uri: uploadIDs[1], width };
+    }
+  }
+
+  const componentId = util.uuid();
+  const submitId = util.uuid();
+  const metricsExtra = JSON.stringify({
+    promptSource: "custom",
+    isDefaultSeed: 1,
+    originSubmitId: submitId,
+    isRegenerate: false,
+    enterFrom: "click",
+    position: "page_bottom_box",
+    functionMode: "first_last_frames",
+    sceneOptions: JSON.stringify([{
+      type: "video",
+      scene: "BasicVideoGenerateButton",
+      resolution,
+      modelReqKey: model,
+      videoDuration: duration,
+      reportParams: {
+        enterSource: "generate",
+        vipSource: "generate",
+        extraVipFunctionKey: `${model}-${resolution}`,
+        useVipFunctionDetailsReporterHoc: true,
+      },
+      materialTypes: [],
+    }]),
+  });
+  const aspectRatio = ratio;
+
+  const internationalVideoReferer = regionInfo.isUS
+    ? "https://dreamina-api.us.capcut.com/ai-tool/generate?type=video"
+    : "https://dreamina.capcut.com/ai-tool/generate?type=video";
+
+  const { aigc_data } = await request("post", "/mweb/v1/aigc_draft/generate", refreshToken, {
+    params: {
+      aigc_features: "app_lip_sync",
+      commerce_with_input_video: "1",
+      web_version: "7.5.0",
+      da_version: draftVersion,
+    },
+    data: {
+      extend: {
+        root_model: end_frame_image ? INTERNATIONAL_VIDEO_MODEL_MAP["jimeng-video-3.0"] : model,
+        m_video_commerce_info: {
+          benefit_type: getVideoBenefitType(model),
+          resource_id: "generate_video",
+          resource_id_type: "str",
+          resource_sub_type: "aigc"
+        },
+        workspace_id: 0,
+        m_video_commerce_info_list: [{
+          benefit_type: getVideoBenefitType(model),
+          resource_id: "generate_video",
+          resource_id_type: "str",
+          resource_sub_type: "aigc"
+        }]
+      },
+      submit_id: submitId,
+      metrics_extra: metricsExtra,
+      draft_content: JSON.stringify({
+        type: "draft",
+        id: util.uuid(),
+        min_version: "3.0.5",
+        min_features: [],
+        is_from_tsn: true,
+        version: draftVersion,
+        main_component_id: componentId,
+        component_list: [{
+          type: "video_base_component",
+          id: componentId,
+          min_version: "1.0.0",
+          aigc_mode: "workbench",
+          metadata: {
+            type: "",
+            id: util.uuid(),
+            created_platform: 3,
+            created_platform_version: "",
+            created_time_in_ms: Date.now().toString(),
+            created_did: ""
+          },
+          generate_type: "gen_video",
+          abilities: {
+            type: "",
+            id: util.uuid(),
+            gen_video: {
+              id: util.uuid(),
+              type: "",
+              text_to_video_params: {
+                type: "",
+                id: util.uuid(),
+                model_req_key: model,
+                priority: 0,
+                seed: Math.floor(Math.random() * 4294967296),
+                video_aspect_ratio: aspectRatio,
+                video_gen_inputs: [{
+                  duration_ms: duration * 1000,
+                  first_frame_image,
+                  end_frame_image,
+                  fps: 24,
+                  id: util.uuid(),
+                  min_version: "3.0.5",
+                  prompt,
+                  resolution,
+                  type: "",
+                  video_mode: 2,
+                  idip_meta_list: [],
+                }]
+              },
+              video_task_extra: metricsExtra,
+            }
+          },
+          process_type: 1,
+        }],
+      }),
+      http_common_info: { aid: assistantId },
+    },
+    headers: { Referer: "https://dreamina.capcut.com/" },
+  });
+
+  const historyId = aigc_data?.history_record_id;
+  if (!historyId) throw new APIException(EX.API_IMAGE_GENERATION_FAILED, "记录ID不存在");
+
+  if (onHistoryId) onHistoryId(historyId);
+  const videoUrl = await pollHistoryForVideoUrl(historyId, refreshToken);
+  return { url: videoUrl, historyId };
+}
+
+export async function generateInternationalVideo(
+  _model: string,
+  prompt: string = "",
+  options: {
+    ratio?: string;
+    resolution?: string;
+    duration?: number;
+    filePaths?: string[];
+    files?: any[];
+  },
+  refreshToken: string
+) {
+  const { url } = await generateInternationalVideoCore(_model, prompt, options, refreshToken);
+  return url;
+}
 export async function generateInternationalSeedanceVideo(
   _model: string,
   prompt: string = "",
@@ -2510,6 +2829,7 @@ export async function generateInternationalSeedanceVideo(
     device_platform: "web",
     region: regionInfo.regionCode,
     os: "windows",
+    commerce_with_input_video: "1",
     web_component_open_flag: "1",
     web_version: "7.5.0",
     aigc_features: "app_lip_sync",
@@ -2693,7 +3013,12 @@ async function _generateInternationalSeedanceVideoWithHistoryId(
 
   // 使用直接请求（带 MD5 签名 + X-Bogus/X-Gnarly 签名）
   logger.info(`异步任务-国际Seedance: 发送 generate 请求...`);
-  const { aigc_data: generateData } = await request("post", "/mweb/v1/aigc_draft/generate", refreshToken, { data: generateBody });
+  const { aigc_data: generateData } = await request("post", "/mweb/v1/aigc_draft/generate", refreshToken, {
+    params: {
+      commerce_with_input_video: "1",
+    },
+    data: generateBody,
+  });
 
   const historyId = generateData?.history_record_id;
   if (!historyId) throw new APIException(EX.API_IMAGE_GENERATION_FAILED, `记录ID不存在: ${JSON.stringify(generateData)}`);
@@ -2717,6 +3042,7 @@ export function submitInternationalAsyncVideoTask(
     resolution?: string;
     duration?: number;
     filePaths?: string[];
+    files?: any[];
     filesMap?: Record<string, any[]>;
     body?: any;
   },
@@ -2749,21 +3075,44 @@ export function submitInternationalAsyncVideoTask(
 
   (async () => {
     try {
-      const { url } = await _generateInternationalSeedanceVideoWithHistoryId(
-        model, prompt, {
-          ratio: options.ratio,
-          resolution: options.resolution,
-          duration: options.duration,
-          filePaths: options.filePaths,
-          filesMap: options.filesMap,
-          body: options.body,
-        }, refreshToken,
-        (historyId) => {
-          task.historyId = historyId;
-          saveTaskToFile(task);
-          logger.info(`国际异步任务: historyId 已保存, ${taskId} -> ${historyId}`);
-        }
-      );
+      let url: string;
+      if (isInternationalSeedanceModel(model)) {
+        const result = await _generateInternationalSeedanceVideoWithHistoryId(
+          model, prompt, {
+            ratio: options.ratio,
+            resolution: options.resolution,
+            duration: options.duration,
+            filePaths: options.filePaths,
+            filesMap: options.filesMap,
+            body: options.body,
+          }, refreshToken,
+          (historyId) => {
+            task.historyId = historyId;
+            saveTaskToFile(task);
+            logger.info(`国际异步任务: historyId 已保存, ${taskId} -> ${historyId}`);
+          }
+        );
+        url = result.url;
+      } else {
+        const result = await generateInternationalVideoCore(
+          model,
+          prompt,
+          {
+            ratio: options.ratio,
+            resolution: options.resolution,
+            duration: options.duration,
+            filePaths: options.filePaths,
+            files: options.files,
+          },
+          refreshToken,
+          (historyId) => {
+            task.historyId = historyId;
+            saveTaskToFile(task);
+            logger.info(`国际异步任务-普通视频: historyId 已保存, ${taskId} -> ${historyId}`);
+          }
+        );
+        url = result.url;
+      }
 
       task.status = "succeeded";
       task.result = { url, revised_prompt: prompt };
@@ -3080,6 +3429,11 @@ interface AsyncTask extends AsyncTaskData {
   _promise?: Promise<void>;
 }
 
+function clearTaskRuntimeWaiters(task: AsyncTask): void {
+  task._resolve = undefined;
+  task._promise = undefined;
+}
+
 // 任务存储目录
 const ASYNC_TASK_DIR = path.join(process.cwd(), "tmp", "async-tasks");
 
@@ -3267,6 +3621,7 @@ function restartPollingForTask(task: AsyncTask): void {
     } finally {
       activeAsyncCount--;
       if (task._resolve) task._resolve();
+      clearTaskRuntimeWaiters(task);
     }
   })();
 }
@@ -3729,6 +4084,7 @@ export function submitAsyncVideoTask(
       if (task._resolve) {
         task._resolve();
       }
+      clearTaskRuntimeWaiters(task);
     }
   })();
 
@@ -3778,7 +4134,9 @@ export async function queryAsyncVideoTask(
     if (task._promise) {
       logger.info(`查询接口等待后台轮询完成: ${taskId}`);
       await task._promise;
-      return task;
+      if (task.status === "succeeded" || task.status === "failed") {
+        return task;
+      }
     }
 
     // 后台轮询已停止（超时或重启后的 processing 任务），做 on-demand 即时查询
